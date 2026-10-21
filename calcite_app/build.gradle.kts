@@ -18,6 +18,10 @@ dependencies {
     implementation("org.apache.calcite:calcite-core:${CALCITE_VERSION}")
     implementation("org.apache.calcite:calcite-server:${CALCITE_VERSION}")
     implementation("org.duckdb:duckdb_jdbc:1.1.3")
+
+    compileOnly("org.immutables:value-annotations:2.12.3")
+
+    annotationProcessor("org.immutables:value:2.12.3")
 }
 
 group = "edu.cmu.cs.db"
@@ -34,6 +38,13 @@ tasks.jar {
         attributes["Main-Class"] = "edu.cmu.cs.db.calcite_app.app.App"
     }
 }
+
+// tasks.withType<JavaExec>().configureEach {
+//   systemProperty(
+//     "org.slf4j.simpleLogger.log.org.apache.calcite.sql.timing",
+//     "debug"
+//   )
+// }
 
 publishing {
     publications.create<MavenPublication>("maven") {

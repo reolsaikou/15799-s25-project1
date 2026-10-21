@@ -27,6 +27,8 @@ submission.zip
 input/
 output/
 data/
+results/
+workload/
 duckdb
 *.db
 *.tgz
