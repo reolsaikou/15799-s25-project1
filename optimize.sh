@@ -16,11 +16,22 @@ mkdir -p input/
 tar xzf "${WORKLOAD}" --directory input/
 
 # Feel free to add more steps here.
+#
+# Create DuckDB database.
+./duckdb ./"${OUTPUT_DIR}"/tpc-h.db <input/data/schema.sql
+
+# Load Data
+(
+  cd input
+
+  ../duckdb ../"${OUTPUT_DIR}"/tpc-h.db <data/load.sql
+  cd ..
+)
 
 # Build and run the Calcite app.
 cd calcite_app/
 ./gradlew build
 ./gradlew shadowJar
 ./gradlew --stop
-java -Xmx4096m -jar build/libs/calcite_app-1.0-SNAPSHOT-all.jar "../input/queries" "../${OUTPUT_DIR}"
+java -Xmx4096m -jar build/libs/calcite_app-1.0-SNAPSHOT-all.jar "../input/queries" "../${OUTPUT_DIR}" "../${OUTPUT_DIR}/tpc-h.db"
 cd -

@@ -16,4 +16,4 @@ cd calcite_app/
 ./gradlew build
 ./gradlew shadowJar
 ./gradlew --stop
-java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:5005 -Xmx4096m -Dorg.slf4j.simpleLogger.log.org.apache.calcite.sql.timing=debug -jar calcite_app/build/libs/calcite_app-1.0-SNAPSHOT-all.jar input/queries results input/db/test.db
+java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:5005 -Xmx4096m -Dorg.slf4j.simpleLogger.log.org.apache.calcite.sql.timing=debug -jar build/libs/calcite_app-1.0-SNAPSHOT-all.jar "../${QUERIES}" "../${OUTPUT_DIR}" "../${DB_PATH}"

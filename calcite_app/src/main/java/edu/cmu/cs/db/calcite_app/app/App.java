@@ -22,6 +22,7 @@ import java.util.stream.Stream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 
@@ -43,6 +44,7 @@ import org.apache.calcite.linq4j.Enumerator;
 import org.apache.calcite.linq4j.QueryProvider;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptCostImpl;
+import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.plan.RelTraitSet;
 import org.apache.calcite.plan.hep.HepPlanner;
@@ -58,6 +60,7 @@ import org.apache.calcite.runtime.ArrayBindable;
 import org.apache.calcite.runtime.Bindable;
 import org.apache.calcite.runtime.Hook;
 import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.schema.impl.ViewTable;
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlDialectFactory;
 import org.apache.calcite.sql.SqlExplainFormat;
@@ -92,9 +95,22 @@ public class App {
   static Program traced(
       String phase,
       Program delegate,
-      BiConsumer<String, String> recorder) {
+      BiConsumer<String, String> recorder,
+      Logger logger) {
     return (planner, input, traits, materializations, lattices) -> {
-      RelNode output = delegate.run(planner, input, traits, materializations, lattices);
+
+      long start = System.nanoTime();
+      RelNode output;
+
+      try {
+        output = delegate.run(planner, input, traits, materializations, lattices);
+      } finally {
+        double elpased = (System.nanoTime() - start) / 1_000_000.0;
+
+        logger.debug("Programs phase = {}, elpased time = {} ms",
+            phase,
+            elpased);
+      }
 
       recorder.accept(phase, RelOptUtil.toString(output, SqlExplainLevel.ALL_ATTRIBUTES));
 
@@ -104,7 +120,7 @@ public class App {
 
   private static void executePhysical(RelNode physicalPlan, CalciteConnection connection, Path outputPath,
       String queryName, CalciteTimingTracer timer)
-      throws IOException {
+      throws IOException, SQLException {
     if (!(physicalPlan instanceof EnumerableRel)) {
       throw new IllegalArgumentException(
           "Expected EnumerableRel, god: "
@@ -148,7 +164,12 @@ public class App {
     };
 
     // Bind Context
-    Enumerator<?> rows = executable.bind(runtime).enumerator();
+
+    timer.traceTime("Bind Context Begin");
+    Enumerable<?> bind = executable.bind(runtime);
+    timer.traceTime("Bind End");
+    Enumerator<?> rows = bind.enumerator();
+    timer.traceTime("Enumerator End");
 
     List<String> lines = new ArrayList<>();
     lines.add(physicalPlan.getRowType().getFieldNames().toString());
@@ -156,20 +177,19 @@ public class App {
     try {
 
       timer.traceTime("execute begin");
-      while (rows.moveNext()) {
-        Object[] row = executable instanceof ArrayBindable ? (Object[]) rows.current()
-            : new Object[] { rows.current() };
 
-        lines.add(row instanceof Object[] ? Arrays.deepToString((Object[]) row) : String.valueOf(row));
-      }
+      SerializeResultSet(
+          (EnumerableRel) physicalPlan,
+          rows,
+          outputPath.resolve(queryName.substring(0, queryName.length() - 4) + "_results.csv").toFile());
+
       timer.traceTime("execute end");
     } finally {
       rows.close();
 
       Files.write(
-          outputPath.resolve("result_" + queryName),
-          lines,
-          StandardCharsets.UTF_8);
+          outputPath.resolve(queryName.substring(0, queryName.length() - 4) + "_results.csv"),
+          lines);
     }
   }
 
@@ -292,6 +312,10 @@ public class App {
       throw new IllegalArgumentException("not a directory: " + dir);
     }
 
+    List<Path> skipped_paths = List.of(Path.of("capybara1.sql"), Path.of("capybara2.sql"), Path.of("capybara3.sql"),
+        Path.of("capybara4.sql"), Path.of("q1.sql"), Path.of("q10.sql"), Path.of("q11.sql"), Path.of("q12.sql"),
+        Path.of("q13.sql"));
+
     List<QueryMeta> metas = new ArrayList<QueryMeta>();
     try (Stream<Path> entreis = Files.list(dir)) {
       Path[] sqlFiles = entreis
@@ -302,6 +326,10 @@ public class App {
 
       for (Path path : sqlFiles) {
         System.out.println(path);
+
+        // if (skipped_paths.contains(path.getFileName())) {
+        // continue;
+        // }
 
         String sql = Files.readString(path);
         try (Planner planner = Frameworks.getPlanner(config)) {
@@ -314,7 +342,16 @@ public class App {
           // rel = planner.transform(0,
           // rel.getTraitSet().replace(EnumerableConvention.INSTANCE), rel);
 
-          SerializePlan(rel, res_dir.resolve("original_relNode_" + path.getFileName().toString()).toFile(), "origin");
+          SerializePlan(
+              rel,
+              res_dir
+                  .resolve(
+                      path.getFileName().toString().substring(0, path.getFileName().toString().length() - 4) + ".txt")
+                  .toFile(),
+              "origin");
+
+          // Or Move?
+          Files.copy(path, res_dir.resolve(path.getFileName()), StandardCopyOption.REPLACE_EXISTING);
           metas.add(new QueryMeta(path.getFileName().toString(), rel));
         }
       }
@@ -367,22 +404,60 @@ public class App {
     Files.writeString(outputPath.toPath(), resultSetString.toString());
   }
 
+  private static void SerializeResultSet(EnumerableRel physicalPlan, Enumerator<?> resultRows, File outputPath)
+      throws SQLException, IOException {
+    int columnCount = physicalPlan.getRowType().getFieldCount();
+    StringBuilder resultSetString = new StringBuilder();
+
+    resultSetString.append(String.join(
+        ",", physicalPlan.getRowType().getFieldNames()));
+
+    resultSetString.append("\n");
+    while (resultRows.moveNext()) {
+      Object current = resultRows.current();
+      Object[] row = current instanceof Object[]
+          ? (Object[]) current
+          : new Object[] { current };
+
+      for (int i = 0; i < columnCount; i++) {
+        if (i > 0) {
+          resultSetString.append(",");
+        }
+        String s = row[i] == null ? "" : row[i].toString();
+        s = s.replace("\n", "\\n");
+        s = s.replace("\r", "\\r");
+        s = s.replace("\"", "\"\"");
+        resultSetString.append("\"");
+        resultSetString.append(s);
+        resultSetString.append("\"");
+      }
+      resultSetString.append("\n");
+    }
+    Files.writeString(outputPath.toPath(), resultSetString.toString());
+  }
+
   public static void main(String[] args) throws Exception {
     if (args.length == 0) {
       System.out.println("Usage: java -jar App.jar <arg1> <arg2>");
       return;
     }
 
-    String key = "org.slf4j.simpleLogger.log.org.apache.calcite.sql.timing";
-
-    System.out.println("日志参数 = " + System.getProperty(key));
+    // String key = "org.slf4j.simpleLogger.log.org.apache.calcite.sql.timing";
+    //
+    // System.out.println("日志参数 = " + System.getProperty(key));
 
     // Feel free to modify this to take as many or as few arguments as you want.
     System.out.println("Running the app!");
+
+    // input dir
     String arg1 = args[0];
     System.out.println("\tArg1: " + arg1);
+
+    // result dir
     String arg2 = args[1];
     System.out.println("\tArg2: " + arg2);
+
+    // database file Path
     String arg3 = args[2];
     System.out.println("\tArg3: " + arg3);
 
@@ -426,106 +501,137 @@ public class App {
     duckDBSchema.add("supplier", new RowCountJdbcTable(table, 10000,
         new ArrayList<>(List.of(10000D, 10000D, 10000D, 25D, 10000D, 9955D, 9998D))));
 
+    String viewSql = "SELECT "
+        + "  \"l_suppkey\" AS \"supplier_no\", "
+        + "  SUM(\"l_extendedprice\" * (1 - \"l_discount\")) "
+        + "    AS \"total_revenue\" "
+        + "FROM \"lineitem\" "
+        + "WHERE \"l_shipdate\" >= DATE '1995-01-01' "
+        + "  AND \"l_shipdate\" < DATE '1995-01-01' + INTERVAL '3' MONTH "
+        + "GROUP BY \"l_suppkey\"";
+    duckDBSchema.add("revenue0r15721", ViewTable.viewMacro(duckDBSchema, viewSql, ImmutableList.of("DuckDB"),
+        ImmutableList.of("DuckDB", "revenue0r15721"), false).apply(ImmutableList.of()));
+
     FrameworkConfig config = Frameworks.newConfigBuilder()
         .defaultSchema(schema)
         .parserConfig(parserConfig)
         .programs(Programs.ofRules())
         .build();
 
-    List<QueryMeta> metas = ReadSqlFromQuriesDir(Path.of(arg1), config, Path.of(arg2));
-
-    RelMetadataProvider provider = ChainedRelMetadataProvider.of(
-        ImmutableList.of(
-            SelectivityHandler.SOURCE,
-            DistinctRowCount.SOURCE,
-            JdbcJoinCost.SOURCE,
-            DefaultRelMetadataProvider.INSTANCE));
-
-    // reduce expressions.
-    Program reduceExpression = Programs.hep(
-        ImmutableList.of(
-            CoreRules.FILTER_REDUCE_EXPRESSIONS,
-            CoreRules.JOIN_REDUCE_EXPRESSIONS,
-            CoreRules.PROJECT_REDUCE_EXPRESSIONS),
-        true,
-        provider);
-
-    // expand the sub queries
-    Program expandSubquery = Programs.subQuery(provider);
-
-    // decorrelate
-    Program decorrelate = (planner, rel, requiredOutputTraits, materializations, lattices) -> RelDecorrelator
-        .decorrelateQuery(
-            rel,
-            RelFactories.LOGICAL_BUILDER.create(
-                rel.getCluster(),
-                null));
-
-    // filter into join.
-
-    Program filterIntoJoin = Programs.hep(
-        ImmutableList.of(CoreRules.FILTER_INTO_JOIN),
-        true,
-        provider);
-
-    // join pull factors
-
-    Program joinPullFactors = Programs.hep(
-        ImmutableList.of(JoinPullFactorsRule.Config.DEFAULT.toRule()),
-        true,
-        provider);
-
-    // trim
-
-    Program trim = ((planner, rel, requiredOutputTraits, materializations, lattices) -> {
-      RelBuilder builder = RelFactories.LOGICAL_BUILDER.create(
-          rel.getCluster(), null);
-
-      return new RelFieldTrimmer(null, builder).trim(rel);
-    });
-
-    // to enumerable
-
-    Program enumerableJoinRule = (planner, rel, requiredTraits, materializations, lattices) -> {
-      // join to Enumerable
-
-      RelOptCluster cluster = rel.getCluster();
-      cluster.setMetadataProvider(provider);
-      cluster.invalidateMetadataQuery();
-
-      planner.addRule(EnumerableRules.ENUMERABLE_JOIN_RULE);
-
-      RelTraitSet targetTraits = rel.getTraitSet().replace(EnumerableConvention.INSTANCE);
-
-      planner.setRoot(rel);
-      RelNode target = planner.changeTraits(rel, targetTraits);
-      planner.setRoot(target);
-      return planner.findBestExp();
-    };
-
-    // join to correlate
-    // Program JoinToCorrelate = Programs.hep(
-    // ImmutableList.of(CoreRules.JOIN_TO_CORRELATE),
-    // true,
-    // DefaultRelMetadataProvider.INSTANCE);
-
-    Map<String, String> plans_tracer = new LinkedHashMap<>();
-
-    Program chain = Programs.sequence(
-        traced("optimization 01 reduce expressions", reduceExpression, plans_tracer::put),
-        traced("optimization 02 expand subquery", expandSubquery, plans_tracer::put),
-        traced("optimization 03 decorrelate", decorrelate, plans_tracer::put),
-        traced("optimization 04 filter into join", filterIntoJoin, plans_tracer::put),
-        traced("optimization 05 join pull factors", joinPullFactors, plans_tracer::put),
-        traced("optimized 06 trim", trim, plans_tracer::put),
-        traced("optimization 07 physical: join to enumerable", enumerableJoinRule, plans_tracer::put),
-        Programs.calc(DefaultRelMetadataProvider.INSTANCE));
-
-    // duckdb connection
-
     try (Connection connection = DriverManager.getConnection("jdbc:calcite:caseSensitive=false")) {
       CalciteConnection calciteConnection = connection.unwrap(CalciteConnection.class);
       calciteConnection.getRootSchema().add("DuckDB", schema.unwrap(JdbcSchema.class));
+
+      List<QueryMeta> metas = ReadSqlFromQuriesDir(Path.of(arg1), config, Path.of(arg2));
+
+      RelMetadataProvider provider = ChainedRelMetadataProvider.of(
+          ImmutableList.of(
+              SelectivityHandler.SOURCE,
+              DistinctRowCount.SOURCE,
+              JdbcJoinCost.SOURCE,
+              DefaultRelMetadataProvider.INSTANCE));
+
+      // reduce expressions.
+      Program reduceExpression = Programs.hep(
+          ImmutableList.of(
+              CoreRules.FILTER_REDUCE_EXPRESSIONS,
+              CoreRules.JOIN_REDUCE_EXPRESSIONS,
+              CoreRules.PROJECT_REDUCE_EXPRESSIONS),
+          true,
+          provider);
+
+      // expand the sub queries
+      Program expandSubquery = Programs.subQuery(provider);
+
+      // decorrelate
+      Program decorrelate = (planner, rel, requiredOutputTraits, materializations, lattices) -> RelDecorrelator
+          .decorrelateQuery(
+              rel,
+              RelFactories.LOGICAL_BUILDER.create(
+                  rel.getCluster(),
+                  null));
+
+      // filter into join.
+
+      Program filterIntoJoin = Programs.hep(
+          ImmutableList.of(CoreRules.FILTER_INTO_JOIN),
+          true,
+          provider);
+
+      // join pull factors
+
+      Program joinPullFactors = Programs.hep(
+          ImmutableList.of(JoinPullFactorsRule.Config.DEFAULT.toRule()),
+          true,
+          provider);
+
+      // trim
+
+      Program trim = ((planner, rel, requiredOutputTraits, materializations, lattices) -> {
+        RelBuilder builder = RelFactories.LOGICAL_BUILDER.create(
+            rel.getCluster(), null);
+
+        return new RelFieldTrimmer(null, builder).trim(rel);
+      });
+
+      // expand distinct aggregates
+      Program expandDistinct = Programs.hep(
+          ImmutableList.of(
+              CoreRules.AGGREGATE_EXPAND_DISTINCT_AGGREGATES,
+              CoreRules.AGGREGATE_REDUCE_FUNCTIONS),
+          true,
+          provider);
+
+      // to enumerable
+      List<RelOptRule> physicalRules = Arrays.asList(
+          EnumerableRules.ENUMERABLE_JOIN_RULE,
+          EnumerableRules.ENUMERABLE_PROJECT_RULE,
+          EnumerableRules.ENUMERABLE_FILTER_RULE,
+          EnumerableRules.ENUMERABLE_AGGREGATE_RULE,
+          EnumerableRules.ENUMERABLE_SORT_RULE,
+          EnumerableRules.ENUMERABLE_TABLE_SCAN_RULE,
+          EnumerableRules.ENUMERABLE_LIMIT_SORT_RULE,
+          EnumerableRules.ENUMERABLE_VALUES_RULE);
+
+      Program enumerableJoinRule = (planner, rel, requiredTraits, materializations, lattices) -> {
+        // join to Enumerable
+
+        RelOptCluster cluster = rel.getCluster();
+        cluster.setMetadataProvider(provider);
+        cluster.invalidateMetadataQuery();
+
+        planner.clear();
+        physicalRules.forEach(planner::addRule);
+
+        RelTraitSet targetTraits = rel.getTraitSet().replace(EnumerableConvention.INSTANCE);
+
+        planner.setRoot(rel);
+        RelNode target = planner.changeTraits(rel, targetTraits);
+        planner.setRoot(target);
+        return planner.findBestExp();
+      };
+
+      // join to correlate
+      // Program JoinToCorrelate = Programs.hep(
+      // ImmutableList.of(CoreRules.JOIN_TO_CORRELATE),
+      // true,
+      // DefaultRelMetadataProvider.INSTANCE);
+
+      Map<String, String> plans_tracer = new LinkedHashMap<>();
+
+      String physical_phase = "optimization 08 physical: join to enumerable";
+      Program chain = Programs.sequence(
+          traced("optimization 01 reduce expressions", reduceExpression, plans_tracer::put, TIMING_LOG),
+          traced("optimization 02 expand subquery", expandSubquery, plans_tracer::put, TIMING_LOG),
+          traced("optimization 03 decorrelate", decorrelate, plans_tracer::put, TIMING_LOG),
+          traced("optimization 04 filter into join", filterIntoJoin, plans_tracer::put, TIMING_LOG),
+          traced("optimization 05 join pull factors", joinPullFactors, plans_tracer::put, TIMING_LOG),
+          traced("optimization 06 trim", trim, plans_tracer::put, TIMING_LOG),
+          traced("optimization 07 expand distinct agg", expandDistinct, plans_tracer::put, TIMING_LOG),
+          traced(physical_phase, enumerableJoinRule, plans_tracer::put, TIMING_LOG),
+          Programs.calc(DefaultRelMetadataProvider.INSTANCE));
+
+      // duckdb connection
 
       for (QueryMeta meta : metas) {
         System.out.println("\t query: " + meta.fileName);
@@ -548,18 +654,27 @@ public class App {
 
         timer.traceTime("optimize end");
 
-        SqlDialect normalDialect = PostgresqlSqlDialect.DEFAULT;
+        timer.traceTime("write begin");
 
-        try (BufferedWriter writer = Files.newBufferedWriter(Path.of(arg2)
-            .resolve("process_relNode_" + meta.fileName.substring(0, meta.fileName.length() - 4) + ".sql"))) {
-          for (Map.Entry<String, String> entry : plans_tracer.entrySet()) {
-            writer.write("================" + entry.getKey() + "================");
-            writer.newLine();
-            writer.write(entry.getValue());
-            writer.newLine();
-            writer.newLine();
-          }
-        }
+        // try (BufferedWriter writer = Files.newBufferedWriter(Path.of(arg2)
+        // .resolve("process_relNode_" + meta.fileName.substring(0,
+        // meta.fileName.length() - 4) + ".sql"))) {
+        // for (Map.Entry<String, String> entry : plans_tracer.entrySet()) {
+        // writer.write("================" + entry.getKey() + "================");
+        // writer.newLine();
+        // writer.write(entry.getValue());
+        // writer.newLine();
+        // writer.newLine();
+        // }
+        // }
+
+        SerializePlan(
+            physicalPlan,
+            Path.of(arg2).resolve(meta.fileName.substring(0, meta.fileName.length() - 4) + "_optimized.txt")
+                .toFile(),
+            "");
+
+        SqlDialect normalDialect = PostgresqlSqlDialect.DEFAULT;
 
         SqlNode sqlNode = new RelToSqlConverter(normalDialect)
             .visitRoot(physicalPlan)
@@ -567,15 +682,17 @@ public class App {
 
         String sql = sqlNode.toSqlString(normalDialect).getSql();
 
-        System.out.println(sql);
-
+        // Write the Result Optimized Sql
         Files.writeString(
-            Path.of(arg2).resolve(meta.fileName.substring(0, meta.fileName.length() - 4) + "_optimized.sql"),
+            Path.of(arg2).resolve(meta.fileName.substring(0, meta.fileName.length() - 4)
+                + "_optimized.sql"),
             sql);
 
-        SerializePlan(physicalPlan, Path.of(arg2).resolve("physicalPlan_relNode_" +
-            meta.fileName).toFile(),
-            "physicalPlan");
+        // SerializePlan(physicalPlan, Path.of(arg2).resolve("physicalPlan_relNode_" +
+        // meta.fileName).toFile(),
+        // "physicalPlan");
+
+        timer.traceTime("write end");
 
         executePhysical(physicalPlan, calciteConnection,
             Path.of(arg2), meta.fileName, timer);

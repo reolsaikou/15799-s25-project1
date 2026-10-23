@@ -100,12 +100,12 @@ public final class SelectivityHandler extends RelMdSelectivity
       rNdv = 1D;
     }
 
-    System.err.println(
-        "join=" + join.getClass().getSimpleName()
-            + ", left=" + join.getLeft().getClass().getSimpleName()
-            + ", lNdv=" + lNdv
-            + ", right=" + join.getRight().getClass().getSimpleName()
-            + ", rNdv=" + rNdv);
+    // System.err.println(
+    // "join=" + join.getClass().getSimpleName()
+    // + ", left=" + join.getLeft().getClass().getSimpleName()
+    // + ", lNdv=" + lNdv
+    // + ", right=" + join.getRight().getClass().getSimpleName()
+    // + ", rNdv=" + rNdv);
 
     if (lNdv == null && rNdv == null) {
       return RelMdUtil.guessSelectivity(predicate);

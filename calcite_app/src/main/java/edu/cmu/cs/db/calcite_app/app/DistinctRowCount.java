@@ -38,21 +38,18 @@ public class DistinctRowCount extends RelMdDistinctRowCount
       RelMetadataQuery mq,
       ImmutableBitSet groupKey,
       RexNode predicate) {
-    if (relNode instanceof TableScan) {
-      RowCountJdbcTable table = relNode.getTable().unwrap(RowCountJdbcTable.class);
-      Double res = 1D;
-      for (int i : groupKey) {
-        res = multiply(res, table.getDistinctRowCount(i));
-      }
-      return res;
+    RowCountJdbcTable table = relNode.getTable().unwrap(RowCountJdbcTable.class);
+
+    if (table == null) {
+      throw new AssertionError("unexpected arguments");
     }
 
-    boolean uniq = RelMdUtil.areColumnsDefinitelyUnique(mq, relNode, groupKey);
-    if (uniq) {
-      return NumberUtil.multiply(mq.getRowCount(relNode),
-          mq.getSelectivity(relNode, predicate));
+    Double res = 1D;
+    for (int i : groupKey) {
+      res = multiply(res, table.getDistinctRowCount(i));
     }
-    return null;
+    return res;
+
   }
 
   private static String describeRel(RelNode rel) {

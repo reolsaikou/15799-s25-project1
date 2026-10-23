@@ -72,3 +72,17 @@ On DuckDB: sql
 may do unexpected heuristic transform.
 It's a JDBC convention process, which only accepts logical plan.
 4. the cost increases after I add the rowCount statistic.
+5. view isn't be expanded to a subquery.
+6. 注意到q9中有大量 enumerable projection, 尝试将project push down to the jdbcTableScan.
+7. Enumerator cost Bunch of Time.
+8. results do not match the result of DuckDB.
+
+### rules
+
+| 规则集合 | 主要用途 | 例子 |
+| --- | --- | --- |
+| CoreRules | 通用逻辑改写 | 过滤下推、连接重排、展开 DISTINCT、改写 AVG |
+| EnumerableRules | 生成或优化 Java Enumerable 执行计划 | Hash Join、聚合、排序、Limit |
+| JdbcRules | 将操作转换到 JDBC 数据源执行 | JDBC Join、Filter、Aggregate，以及返回 Enumerable 的转换 |
+| Bindables | 提供 Bindable 执行相关规则 | Bindable Scan、Filter、Join |
+| 各适配器的规则集合 | 将操作下推到对应引擎 | Elasticsearch、MongoDB、Druid、Spark 等 |
