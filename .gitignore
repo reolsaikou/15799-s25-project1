@@ -28,6 +28,7 @@ input/
 output/
 data/
 results/
+results_duckdb/
 workload/
 duckdb
 *.db

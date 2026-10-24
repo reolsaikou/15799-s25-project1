@@ -62,6 +62,7 @@ On DuckDB: sql
  1.2
 2. row expression
 3. partitioned band join
+4. Explain of DuckDB is intuitive.
 
 ### bug
 
@@ -76,6 +77,9 @@ It's a JDBC convention process, which only accepts logical plan.
 6. 注意到q9中有大量 enumerable projection, 尝试将project push down to the jdbcTableScan.
 7. Enumerator cost Bunch of Time.
 8. results do not match the result of DuckDB.
+9. 对于duckdb来说， 输出的结果按照row_group 划分的？ 考虑在execute engine方面有什么优化？
+set threas = 1;
+后输出比较常规，猜测是多个row group并行执行。
 
 ### rules
 
